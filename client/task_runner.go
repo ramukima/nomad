@@ -65,10 +65,11 @@ type TaskRunner struct {
 	// downloaded
 	artifactsDownloaded bool
 
-	destroy     bool
-	destroyCh   chan struct{}
-	destroyLock sync.Mutex
-	waitCh      chan struct{}
+	destroy       bool
+	destroyCh     chan struct{}
+	destroyLock   sync.Mutex
+	destroyReason string
+	waitCh        chan struct{}
 }
 
 // taskRunnerState is used to snapshot the state of the task runner
@@ -106,6 +107,7 @@ func NewTaskRunner(logger *log.Logger, config *config.Config,
 		ctx:            ctx,
 		alloc:          alloc,
 		task:           task,
+		destroyReason:  structs.TaskKilled,
 		updateCh:       make(chan *structs.Allocation, 64),
 		destroyCh:      make(chan struct{}),
 		waitCh:         make(chan struct{}),
@@ -305,7 +307,7 @@ func (r *TaskRunner) validateTask() error {
 }
 
 func (r *TaskRunner) run() {
-	// Predeclare things so we an jump to the RESTART
+	// Predeclare things so we can jump to the RESTART
 	var handleEmpty bool
 	var stopCollection chan struct{}
 
@@ -408,7 +410,7 @@ func (r *TaskRunner) run() {
 				close(stopCollection)
 
 				// Store that the task has been destroyed and any associated error.
-				r.setState(structs.TaskStateDead, structs.NewTaskEvent(structs.TaskKilled).SetKillError(err))
+				r.setState(structs.TaskStateDead, structs.NewTaskEvent(r.destroyReason).SetKillError(err))
 
 				r.runningLock.Lock()
 				r.running = false
@@ -453,8 +455,8 @@ func (r *TaskRunner) run() {
 		destroyed := r.destroy
 		r.destroyLock.Unlock()
 		if destroyed {
-			r.logger.Printf("[DEBUG] client: Not restarting task: %v because it's destroyed by user", r.task.Name)
-			r.setState(structs.TaskStateDead, structs.NewTaskEvent(structs.TaskKilled))
+			r.logger.Printf("[DEBUG] client: Not restarting task: %v because it has been destroyed by user", r.task.Name)
+			r.setState(structs.TaskStateDead, structs.NewTaskEvent(r.destroyReason))
 			return
 		}
 
@@ -466,7 +468,7 @@ func (r *TaskRunner) run() {
 	}
 }
 
-// startTask creates the driver and start the task.
+// startTask creates the driver and starts the task.
 func (r *TaskRunner) startTask() error {
 	// Create a driver
 	driver, err := r.createDriver()
@@ -626,7 +628,7 @@ func (r *TaskRunner) Update(update *structs.Allocation) {
 }
 
 // Destroy is used to indicate that the task context should be destroyed
-func (r *TaskRunner) Destroy() {
+func (r *TaskRunner) Destroy(reason string) {
 	r.destroyLock.Lock()
 	defer r.destroyLock.Unlock()
 
@@ -634,6 +636,7 @@ func (r *TaskRunner) Destroy() {
 		return
 	}
 	r.destroy = true
+	r.destroyReason = reason
 	close(r.destroyCh)
 }
 

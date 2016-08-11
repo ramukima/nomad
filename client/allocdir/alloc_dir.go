@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,11 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hpcloud/tail/watch"
+)
+
+const (
+	minCheckDiskInterval = 3 * time.Minute
+	maxCheckDiskInterval = 15 * time.Second
 )
 
 var (
@@ -45,6 +51,17 @@ type AllocDir struct {
 
 	// TaskDirs is a mapping of task names to their non-shared directory.
 	TaskDirs map[string]string
+
+	// Size is the total consumed disk size of the shared directory in bytes
+	Size int64
+
+	// destroyCh signals that the alloc directory is being torn down and that
+	// any monitoring on it should stop.
+	destroyCh chan struct{}
+
+	// maxSize represents the total amount of bytes that the shared allocation
+	// directory is allowed to consume.
+	maxSize int64
 }
 
 // AllocFileInfo holds information about a file inside the AllocDir
@@ -65,14 +82,23 @@ type AllocDirFS interface {
 	ChangeEvents(path string, curOffset int64, t *tomb.Tomb) (*watch.FileChanges, error)
 }
 
-func NewAllocDir(allocDir string) *AllocDir {
-	d := &AllocDir{AllocDir: allocDir, TaskDirs: make(map[string]string)}
+func NewAllocDir(allocDir string, maxSize int64) *AllocDir {
+	d := &AllocDir{
+		AllocDir:  allocDir,
+		maxSize:   maxSize,
+		TaskDirs:  make(map[string]string),
+		destroyCh: make(chan struct{}),
+	}
 	d.SharedDir = filepath.Join(d.AllocDir, SharedAllocName)
 	return d
 }
 
 // Tears down previously build directory structure.
 func (d *AllocDir) Destroy() error {
+
+	// Stop monitoring on the alloc directory
+	close(d.destroyCh)
+
 	// Unmount all mounted shared alloc dirs.
 	var mErr multierror.Error
 	if err := d.UnmountAll(); err != nil {
@@ -402,4 +428,37 @@ func (d *AllocDir) pathExists(path string) bool {
 		}
 	}
 	return true
+}
+
+// WatchSharedDir periodically checks the disk space consumed by the shared
+// allocation directory.
+func (d *AllocDir) WatchSharedDir() {
+	sync := time.NewTimer(minCheckDiskInterval)
+	defer sync.Stop()
+
+	for {
+		select {
+		case <-d.destroyCh:
+			return
+		case <-sync.C:
+			if err := d.syncDiskUsage(); err != nil {
+				log.Printf("[WARN] client: failed to sync disk usage: %v", err)
+			}
+			diskRatio := float64(d.Size) / float64(d.maxSize)
+			nextInterval := minCheckDiskInterval
+			sync.Reset(nextInterval)
+			log.Printf("Disk ratio: %f", diskRatio)
+		}
+	}
+}
+
+// syncDiskUsage walks the shared allocation directory recursively and
+// calculates the total consumed disk space.
+func (d *AllocDir) syncDiskUsage() error {
+	d.Size = 0
+	return filepath.Walk(d.SharedDir,
+		func(path string, info os.FileInfo, err error) error {
+			d.Size += info.Size()
+			return nil
+		})
 }

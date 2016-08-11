@@ -25,6 +25,10 @@ const (
 	// update will transfer all past state information. If not other transition
 	// has occurred up to this limit, we will send to the server.
 	taskReceivedSyncLimit = 30 * time.Second
+
+	// watchdogInterval is the interval at which resource constraints for the
+	// allocation are being checked and enforced.
+	watchdogInterval = 5 * time.Second
 )
 
 // AllocStateUpdater is used to update the status of an allocation
@@ -54,14 +58,16 @@ type AllocRunner struct {
 	restored   map[string]struct{}
 	taskLock   sync.RWMutex
 
-	taskStatusLock sync.RWMutex
+	taskStatusLock    sync.RWMutex
+	taskDestroyReason string
 
 	updateCh chan *structs.Allocation
 
-	destroy     bool
-	destroyCh   chan struct{}
-	destroyLock sync.Mutex
-	waitCh      chan struct{}
+	destroy       bool
+	destroyCh     chan struct{}
+	destroyLock   sync.Mutex
+	destroyReason string
+	waitCh        chan struct{}
 }
 
 // allocRunnerState is used to snapshot the state of the alloc runner
@@ -78,17 +84,18 @@ type allocRunnerState struct {
 func NewAllocRunner(logger *log.Logger, config *config.Config, updater AllocStateUpdater,
 	alloc *structs.Allocation) *AllocRunner {
 	ar := &AllocRunner{
-		config:     config,
-		updater:    updater,
-		logger:     logger,
-		alloc:      alloc,
-		dirtyCh:    make(chan struct{}, 1),
-		tasks:      make(map[string]*TaskRunner),
-		taskStates: copyTaskStates(alloc.TaskStates),
-		restored:   make(map[string]struct{}),
-		updateCh:   make(chan *structs.Allocation, 64),
-		destroyCh:  make(chan struct{}),
-		waitCh:     make(chan struct{}),
+		config:            config,
+		updater:           updater,
+		logger:            logger,
+		alloc:             alloc,
+		dirtyCh:           make(chan struct{}, 1),
+		tasks:             make(map[string]*TaskRunner),
+		taskStates:        copyTaskStates(alloc.TaskStates),
+		taskDestroyReason: structs.TaskKilled,
+		restored:          make(map[string]struct{}),
+		updateCh:          make(chan *structs.Allocation, 64),
+		destroyCh:         make(chan struct{}),
+		waitCh:            make(chan struct{}),
 	}
 	return ar
 }
@@ -238,6 +245,12 @@ func (r *AllocRunner) Alloc() *structs.Allocation {
 	if r.allocClientStatus != "" || r.allocClientDescription != "" {
 		alloc.ClientStatus = r.allocClientStatus
 		alloc.ClientDescription = r.allocClientDescription
+
+		// Copy over the task states so we don't lose them
+		r.taskStatusLock.RLock()
+		alloc.TaskStates = copyTaskStates(r.taskStates)
+		r.taskStatusLock.RUnlock()
+
 		r.allocLock.Unlock()
 		return alloc
 	}
@@ -329,7 +342,7 @@ func (r *AllocRunner) setTaskState(taskName, state string, event *structs.TaskEv
 		for task, tr := range r.tasks {
 			if task != taskName {
 				destroyingTasks = append(destroyingTasks, task)
-				tr.Destroy()
+				tr.Destroy(r.taskDestroyReason)
 			}
 		}
 		if len(destroyingTasks) > 0 {
@@ -377,7 +390,7 @@ func (r *AllocRunner) Run() {
 	// Create the execution context
 	r.ctxLock.Lock()
 	if r.ctx == nil {
-		allocDir := allocdir.NewAllocDir(filepath.Join(r.config.AllocDir, r.alloc.ID))
+		allocDir := allocdir.NewAllocDir(filepath.Join(r.config.AllocDir, r.alloc.ID), r.Alloc().Resources.DiskInBytes())
 		if err := allocDir.Build(tg.Tasks); err != nil {
 			r.logger.Printf("[WARN] client: failed to build task directories: %v", err)
 			r.setStatus(structs.AllocClientStatusFailed, fmt.Sprintf("failed to build task dirs for '%s'", alloc.TaskGroup))
@@ -414,6 +427,12 @@ func (r *AllocRunner) Run() {
 	}
 	r.taskLock.Unlock()
 
+	// Start watching the shared allocation directory for disk usage
+	go r.ctx.AllocDir.WatchSharedDir()
+
+	watchdog := time.NewTicker(watchdogInterval)
+	defer watchdog.Stop()
+
 OUTER:
 	// Wait for updates
 	for {
@@ -434,6 +453,12 @@ OUTER:
 			for _, tr := range runners {
 				tr.Update(update)
 			}
+		case <-watchdog.C:
+			if exceeded, reason := r.checkResources(); exceeded {
+				r.setStatus(structs.AllocClientStatusFailed, reason)
+				r.taskDestroyReason = reason
+				break OUTER
+			}
 		case <-r.destroyCh:
 			break OUTER
 		}
@@ -442,7 +467,7 @@ OUTER:
 	// Destroy each sub-task
 	runners := r.getTaskRunners()
 	for _, tr := range runners {
-		tr.Destroy()
+		tr.Destroy(r.taskDestroyReason)
 	}
 
 	// Wait for termination of the task runners
@@ -456,6 +481,14 @@ OUTER:
 	// Block until we should destroy the state of the alloc
 	r.handleDestroy()
 	r.logger.Printf("[DEBUG] client: terminating runner for alloc '%s'", r.alloc.ID)
+}
+
+// checkResources monitors and enforces alloc resource usage
+func (r *AllocRunner) checkResources() (bool, string) {
+	if r.ctx.AllocDir.Size > r.Alloc().Resources.DiskInBytes() {
+		return true, structs.TaskDiskExceeded
+	}
+	return false, ""
 }
 
 // handleDestroy blocks till the AllocRunner should be destroyed and does the
