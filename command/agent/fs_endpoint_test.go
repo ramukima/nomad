@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/nomad/client/allocdir"
+	"github.com/hashicorp/nomad/nomad/structs"
 	"github.com/hashicorp/nomad/testutil"
 	"github.com/ugorji/go/codec"
 )
@@ -446,7 +447,7 @@ func tempAllocDir(t *testing.T) *allocdir.AllocDir {
 		t.Fatalf("failed to chmod dir: %v", err)
 	}
 
-	return allocdir.NewAllocDir(dir)
+	return allocdir.NewAllocDir(dir, int64(structs.DefaultResources().DiskMB))
 }
 
 type nopWriteCloser struct {

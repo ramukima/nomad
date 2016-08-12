@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -54,9 +55,9 @@ type AllocDir struct {
 	// Size is the total consumed disk size of the shared directory in bytes
 	Size int64
 
-	// destroyCh signals that the alloc directory is being torn down and that
+	// watchCh signals that the alloc directory is being torn down and that
 	// any monitoring on it should stop.
-	destroyCh chan struct{}
+	watchCh chan struct{}
 
 	// maxSize represents the total amount of bytes that the shared allocation
 	// directory is allowed to consume.
@@ -83,10 +84,10 @@ type AllocDirFS interface {
 
 func NewAllocDir(allocDir string, maxSize int64) *AllocDir {
 	d := &AllocDir{
-		AllocDir:  allocDir,
-		maxSize:   maxSize,
-		TaskDirs:  make(map[string]string),
-		destroyCh: make(chan struct{}),
+		AllocDir: allocDir,
+		maxSize:  maxSize,
+		TaskDirs: make(map[string]string),
+		watchCh:  make(chan struct{}),
 	}
 	d.SharedDir = filepath.Join(d.AllocDir, SharedAllocName)
 	return d
@@ -94,9 +95,6 @@ func NewAllocDir(allocDir string, maxSize int64) *AllocDir {
 
 // Tears down previously build directory structure.
 func (d *AllocDir) Destroy() error {
-
-	// Stop monitoring on the alloc directory
-	close(d.destroyCh)
 
 	// Unmount all mounted shared alloc dirs.
 	var mErr multierror.Error
@@ -426,33 +424,56 @@ func (d *AllocDir) pathExists(path string) bool {
 
 // WatchSharedDir periodically checks the disk space consumed by the shared
 // allocation directory.
-func (d *AllocDir) WatchSharedDir() {
-	sync := time.NewTimer(minCheckDiskInterval)
+func (d *AllocDir) StartDiskWatcher() {
+	start := time.Now()
+
+	sync := time.NewTimer(maxCheckDiskInterval)
 	defer sync.Stop()
+
+	d.watchCh = make(chan struct{})
 
 	for {
 		select {
-		case <-d.destroyCh:
+		case <-d.watchCh:
 			return
 		case <-sync.C:
 			if err := d.syncDiskUsage(); err != nil {
 				log.Printf("[WARN] client: failed to sync disk usage: %v", err)
 			}
+			// calculate the disk ratio
 			diskRatio := float64(d.Size) / float64(d.maxSize)
-			nextInterval := minCheckDiskInterval
+
+			// exponentially decrease the interval when the disk ratio increases
+			nextInterval := time.Duration(int64(1.0/(0.1*math.Pow(diskRatio, 2))+5)) * time.Second
+
+			// Use the maximum interval for the first five minutes or if the
+			// disk ratio is sufficiently high. Also use the minimum check interval
+			// if the disk ratio becomes low enough.
+			if nextInterval < maxCheckDiskInterval || time.Since(start) < 5*time.Minute {
+				nextInterval = maxCheckDiskInterval
+			} else if nextInterval > minCheckDiskInterval {
+				nextInterval = minCheckDiskInterval
+			}
 			sync.Reset(nextInterval)
-			log.Printf("Disk ratio: %f", diskRatio)
 		}
 	}
+}
+
+// stopDiskWatcher closes the watch channel which causes the disk monitoring to stop.
+func (d *AllocDir) StopDiskWatcher() {
+	close(d.watchCh)
 }
 
 // syncDiskUsage walks the shared allocation directory recursively and
 // calculates the total consumed disk space.
 func (d *AllocDir) syncDiskUsage() error {
-	d.Size = 0
-	return filepath.Walk(d.SharedDir,
+	var size int64
+	err := filepath.Walk(d.SharedDir,
 		func(path string, info os.FileInfo, err error) error {
-			d.Size += info.Size()
+			size += info.Size()
 			return nil
 		})
+	// Store the disk consumption
+	d.Size = size
+	return err
 }

@@ -427,7 +427,7 @@ func (r *AllocRunner) Run() {
 	r.taskLock.Unlock()
 
 	// Start watching the shared allocation directory for disk usage
-	go r.ctx.AllocDir.WatchSharedDir()
+	go r.ctx.AllocDir.StartDiskWatcher()
 
 	watchdog := time.NewTicker(watchdogInterval)
 	defer watchdog.Stop()
@@ -476,6 +476,9 @@ OUTER:
 
 	// Final state sync
 	r.syncStatus()
+
+	// Stop watching the shared allocation directory
+	r.ctx.AllocDir.StopDiskWatcher()
 
 	// Block until we should destroy the state of the alloc
 	r.handleDestroy()
