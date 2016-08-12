@@ -136,11 +136,23 @@ func TestSystemSched_JobRegister_Annotate(t *testing.T) {
 	// Create some nodes
 	for i := 0; i < 10; i++ {
 		node := mock.Node()
+		if i < 9 {
+			node.NodeClass = "foo"
+		} else {
+			node.NodeClass = "bar"
+		}
+		node.ComputeClass()
 		noErr(t, h.State.UpsertNode(h.NextIndex(), node))
 	}
 
-	// Create a job
+	// Create a job constraining on node class
 	job := mock.SystemJob()
+	fooConstraint := &structs.Constraint{
+		LTarget: "${node.class}",
+		RTarget: "foo",
+		Operand: "==",
+	}
+	job.Constraints = append(job.Constraints, fooConstraint)
 	noErr(t, h.State.UpsertJob(h.NextIndex(), job))
 
 	// Create a mock evaluation to deregister the job
@@ -169,8 +181,8 @@ func TestSystemSched_JobRegister_Annotate(t *testing.T) {
 	for _, allocList := range plan.NodeAllocation {
 		planned = append(planned, allocList...)
 	}
-	if len(planned) != 10 {
-		t.Fatalf("bad: %#v", plan)
+	if len(planned) != 9 {
+		t.Fatalf("bad: %#v %d", planned, len(planned))
 	}
 
 	// Lookup the allocations by JobID
@@ -178,7 +190,7 @@ func TestSystemSched_JobRegister_Annotate(t *testing.T) {
 	noErr(t, err)
 
 	// Ensure all allocations placed
-	if len(out) != 10 {
+	if len(out) != 9 {
 		t.Fatalf("bad: %#v", out)
 	}
 
@@ -204,7 +216,7 @@ func TestSystemSched_JobRegister_Annotate(t *testing.T) {
 		t.Fatalf("expected task group web to have desired changes")
 	}
 
-	expected := &structs.DesiredUpdates{Place: 10}
+	expected := &structs.DesiredUpdates{Place: 9}
 	if !reflect.DeepEqual(desiredChanges, expected) {
 		t.Fatalf("Unexpected desired updates; got %#v; want %#v", desiredChanges, expected)
 	}
@@ -752,6 +764,65 @@ func TestSystemSched_NodeDown(t *testing.T) {
 	h.AssertEvalStatus(t, structs.EvalStatusComplete)
 }
 
+func TestSystemSched_NodeDrain_Down(t *testing.T) {
+	h := NewHarness(t)
+
+	// Register a draining node
+	node := mock.Node()
+	node.Drain = true
+	node.Status = structs.NodeStatusDown
+	noErr(t, h.State.UpsertNode(h.NextIndex(), node))
+
+	// Generate a fake job allocated on that node.
+	job := mock.SystemJob()
+	noErr(t, h.State.UpsertJob(h.NextIndex(), job))
+
+	alloc := mock.Alloc()
+	alloc.Job = job
+	alloc.JobID = job.ID
+	alloc.NodeID = node.ID
+	alloc.Name = "my-job.web[0]"
+	noErr(t, h.State.UpsertAllocs(h.NextIndex(), []*structs.Allocation{alloc}))
+
+	// Create a mock evaluation to deal with the node update
+	eval := &structs.Evaluation{
+		ID:          structs.GenerateUUID(),
+		Priority:    50,
+		TriggeredBy: structs.EvalTriggerNodeUpdate,
+		JobID:       job.ID,
+		NodeID:      node.ID,
+	}
+
+	// Process the evaluation
+	err := h.Process(NewServiceScheduler, eval)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Ensure a single plan
+	if len(h.Plans) != 1 {
+		t.Fatalf("bad: %#v", h.Plans)
+	}
+	plan := h.Plans[0]
+
+	// Ensure the plan evicted non terminal allocs
+	if len(plan.NodeUpdate[node.ID]) != 1 {
+		t.Fatalf("bad: %#v", plan)
+	}
+
+	// Ensure that the allocation is marked as lost
+	var lostAllocs []string
+	for _, alloc := range plan.NodeUpdate[node.ID] {
+		lostAllocs = append(lostAllocs, alloc.ID)
+	}
+	expected := []string{alloc.ID}
+
+	if !reflect.DeepEqual(lostAllocs, expected) {
+		t.Fatalf("expected: %v, actual: %v", expected, lostAllocs)
+	}
+	h.AssertEvalStatus(t, structs.EvalStatusComplete)
+}
+
 func TestSystemSched_NodeDrain(t *testing.T) {
 	h := NewHarness(t)
 
@@ -900,4 +971,40 @@ func TestSystemSched_RetryLimit(t *testing.T) {
 
 	// Should hit the retry limit
 	h.AssertEvalStatus(t, structs.EvalStatusFailed)
+}
+
+// This test ensures that the scheduler doesn't increment the queued allocation
+// count for a task group when allocations can't be created on currently
+// availabe nodes because of constrain mismatches.
+func TestSystemSched_Queued_With_Constraints(t *testing.T) {
+	h := NewHarness(t)
+
+	// Register a node
+	node := mock.Node()
+	node.Attributes["kernel.name"] = "darwin"
+	noErr(t, h.State.UpsertNode(h.NextIndex(), node))
+
+	// Generate a system job which can't be placed on the node
+	job := mock.SystemJob()
+	noErr(t, h.State.UpsertJob(h.NextIndex(), job))
+
+	// Create a mock evaluation to deal
+	eval := &structs.Evaluation{
+		ID:          structs.GenerateUUID(),
+		Priority:    50,
+		TriggeredBy: structs.EvalTriggerNodeUpdate,
+		JobID:       job.ID,
+		NodeID:      node.ID,
+	}
+
+	// Process the evaluation
+	err := h.Process(NewSystemScheduler, eval)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Ensure that queued allocations is zero
+	if val, ok := h.Evals[0].QueuedAllocations["web"]; !ok || val != 0 {
+		t.Fatalf("bad queued allocations: %#v", h.Evals[0].QueuedAllocations)
+	}
 }

@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"gopkg.in/tomb.v1"
@@ -393,12 +392,7 @@ func (d *AllocDir) ChangeEvents(path string, curOffset int64, t *tomb.Tomb) (*wa
 
 // getFileWatcher returns a FileWatcher for the given path.
 func getFileWatcher(path string) watch.FileWatcher {
-	if runtime.GOOS == "windows" {
-		// There are some deadlock issues with the inotify implementation on
-		// windows. Use polling watcher for now.
-		return watch.NewPollingFileWatcher(path)
-	}
-	return watch.NewInotifyFileWatcher(path)
+	return watch.NewPollingFileWatcher(path)
 }
 
 func fileCopy(src, dst string, perm os.FileMode) error {
