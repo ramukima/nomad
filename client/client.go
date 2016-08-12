@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/nomad/client/fingerprint"
 	"github.com/hashicorp/nomad/client/rpcproxy"
 	"github.com/hashicorp/nomad/client/stats"
+	"github.com/hashicorp/nomad/client/vaultclient"
 	"github.com/hashicorp/nomad/command/agent/consul"
 	"github.com/hashicorp/nomad/nomad"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -141,6 +142,8 @@ type Client struct {
 	shutdown     bool
 	shutdownCh   chan struct{}
 	shutdownLock sync.Mutex
+
+	vaultClient vaultclient.VaultClient
 }
 
 // NewClient is used to create a new client from the given configuration
@@ -206,6 +209,10 @@ func NewClient(cfg *config.Config, consulSyncer *consul.Syncer, logger *log.Logg
 		return nil, fmt.Errorf("failed to create client Consul syncer: %v", err)
 	}
 
+	if err := c.setupVaultClient(); err != nil {
+		return nil, fmt.Errorf("failed to create vault client: %v", err)
+	}
+
 	// Register and then start heartbeating to the servers.
 	go c.registerAndHeartbeat()
 
@@ -230,6 +237,10 @@ func NewClient(cfg *config.Config, consulSyncer *consul.Syncer, logger *log.Logg
 	// times out and there are no Nomad servers available, this data is
 	// populated by periodically polling Consul, if available.
 	go c.rpcProxy.Run()
+
+	// Start renewing Vault tokens
+	go c.vaultClient.Run()
+	c.vaultClient.Stop()
 
 	return c, nil
 }
@@ -1210,6 +1221,21 @@ func (c *Client) addAlloc(alloc *structs.Allocation) error {
 	c.allocLock.Lock()
 	c.allocs[alloc.ID] = ar
 	c.allocLock.Unlock()
+	return nil
+}
+
+func (c *Client) setupVaultClient() error {
+	if c.config.VaultConfig == nil {
+		return fmt.Errorf("nil vaultConfig")
+	}
+	if c.config.VaultConfig.PeriodicToken == "" {
+		return fmt.Errorf("periodic_token not set")
+	}
+
+	c.vaultClient = &vaultclient.DefaultVaultClient{
+		PeriodicToken: c.config.VaultConfig.PeriodicToken,
+		ShutdownCh:    make(chan bool),
+	}
 	return nil
 }
 
