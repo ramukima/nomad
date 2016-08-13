@@ -18,8 +18,17 @@ import (
 )
 
 const (
+	// The minimum frequency to use for disk monitoring.
 	minCheckDiskInterval = 3 * time.Minute
+
+	// The maximum frequency to use for disk monitoring.
 	maxCheckDiskInterval = 15 * time.Second
+
+	// The amount of time that maxCheckDiskInterval is always used after
+	// starting the allocation. This prevents unbounded disk usage that would
+	// otherwise be possible for a number of minutes if we started with the
+	// minCheckDiskInterval.
+	checkDiskMaxEnforcePeriod = 5 * time.Minute
 )
 
 var (
@@ -449,7 +458,7 @@ func (d *AllocDir) StartDiskWatcher() {
 			// Use the maximum interval for the first five minutes or if the
 			// disk ratio is sufficiently high. Also use the minimum check interval
 			// if the disk ratio becomes low enough.
-			if nextInterval < maxCheckDiskInterval || time.Since(start) < 5*time.Minute {
+			if nextInterval < maxCheckDiskInterval || time.Since(start) < checkDiskMaxEnforcePeriod {
 				nextInterval = maxCheckDiskInterval
 			} else if nextInterval > minCheckDiskInterval {
 				nextInterval = minCheckDiskInterval
