@@ -205,7 +205,7 @@ func TestAllocRunner_DiskExceeded_Destroy(t *testing.T) {
 		// Check the status has changed.
 		last := upd.Allocs[upd.Count-1]
 		if last.ClientStatus != structs.AllocClientStatusFailed {
-			return false, fmt.Errorf("got client status %v; want %v", last.ClientStatus, structs.AllocClientStatusComplete)
+			return false, fmt.Errorf("got client status %v; want %v", last.ClientStatus, structs.AllocClientStatusFailed)
 		}
 
 		// Check the state still exists
@@ -234,7 +234,7 @@ func TestAllocRunner_DiskExceeded_Destroy(t *testing.T) {
 		// Check the status has changed.
 		last := upd.Allocs[upd.Count-1]
 		if last.ClientStatus != structs.AllocClientStatusFailed {
-			return false, fmt.Errorf("got client status %v; want %v", last.ClientStatus, structs.AllocClientStatusComplete)
+			return false, fmt.Errorf("got client status %v; want %v", last.ClientStatus, structs.AllocClientStatusFailed)
 		}
 
 		// Check the state was cleaned

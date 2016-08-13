@@ -389,7 +389,7 @@ func (r *AllocRunner) Run() {
 	// Create the execution context
 	r.ctxLock.Lock()
 	if r.ctx == nil {
-		allocDir := allocdir.NewAllocDir(filepath.Join(r.config.AllocDir, r.alloc.ID), r.Alloc().Resources.DiskInBytes())
+		allocDir := allocdir.NewAllocDir(filepath.Join(r.config.AllocDir, r.alloc.ID), r.Alloc().Resources.DiskMB)
 		if err := allocDir.Build(tg.Tasks); err != nil {
 			r.logger.Printf("[WARN] client: failed to build task directories: %v", err)
 			r.setStatus(structs.AllocClientStatusFailed, fmt.Sprintf("failed to build task dirs for '%s'", alloc.TaskGroup))

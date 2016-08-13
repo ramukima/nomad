@@ -721,7 +721,7 @@ type Resources struct {
 }
 
 const (
-	bytesInMegabyte = 1024 * 1024
+	BytesInMegabyte = 1024 * 1024
 )
 
 // DefaultResources returns the default resources for a task.
@@ -735,7 +735,7 @@ func DefaultResources() *Resources {
 }
 
 func (r *Resources) DiskInBytes() int64 {
-	return int64(r.DiskMB * bytesInMegabyte)
+	return int64(r.DiskMB * BytesInMegabyte)
 }
 
 // Merge merges this resource with another resource.
