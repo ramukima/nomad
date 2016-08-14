@@ -734,6 +734,7 @@ func DefaultResources() *Resources {
 	}
 }
 
+// DiskInBytes returns the amount of disk resources in bytes.
 func (r *Resources) DiskInBytes() int64 {
 	return int64(r.DiskMB * BytesInMegabyte)
 }
@@ -2164,6 +2165,10 @@ const (
 	// TaskDiskExceeded indicates that one of the tasks in a taskgroup has
 	// exceeded the requested disk resources.
 	TaskDiskExceeded = "Disk Resources Exceeded"
+
+	// TaskSiblingFailed indicates that a sibling task in the task group has
+	// failed.
+	TaskSiblingFailed = "Sibling task failed"
 )
 
 // TaskEvent is an event that effects the state of a task and contains meta-data

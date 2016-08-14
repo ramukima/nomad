@@ -63,11 +63,10 @@ type AllocRunner struct {
 
 	updateCh chan *structs.Allocation
 
-	destroy       bool
-	destroyCh     chan struct{}
-	destroyLock   sync.Mutex
-	destroyReason string
-	waitCh        chan struct{}
+	destroy     bool
+	destroyCh   chan struct{}
+	destroyLock sync.Mutex
+	waitCh      chan struct{}
 }
 
 // allocRunnerState is used to snapshot the state of the alloc runner
@@ -341,7 +340,7 @@ func (r *AllocRunner) setTaskState(taskName, state string, event *structs.TaskEv
 		for task, tr := range r.tasks {
 			if task != taskName {
 				destroyingTasks = append(destroyingTasks, task)
-				tr.Destroy(r.taskDestroyReason)
+				tr.Destroy(structs.NewTaskEvent(structs.TaskSiblingFailed))
 			}
 		}
 		if len(destroyingTasks) > 0 {
@@ -432,6 +431,10 @@ func (r *AllocRunner) Run() {
 	watchdog := time.NewTicker(watchdogInterval)
 	defer watchdog.Stop()
 
+	// taskDestroyEvent contains an event that caused termination of a task
+	// in the allocation.
+	var taskDestroyEvent *structs.TaskEvent
+
 OUTER:
 	// Wait for updates
 	for {
@@ -453,9 +456,9 @@ OUTER:
 				tr.Update(update)
 			}
 		case <-watchdog.C:
-			if exceeded, reason := r.checkResources(); exceeded {
-				r.setStatus(structs.AllocClientStatusFailed, reason)
-				r.taskDestroyReason = reason
+			if event, desc := r.checkResources(); event != nil {
+				r.setStatus(structs.AllocClientStatusFailed, desc)
+				taskDestroyEvent = event
 				break OUTER
 			}
 		case <-r.destroyCh:
@@ -466,7 +469,7 @@ OUTER:
 	// Destroy each sub-task
 	runners := r.getTaskRunners()
 	for _, tr := range runners {
-		tr.Destroy(r.taskDestroyReason)
+		tr.Destroy(taskDestroyEvent)
 	}
 
 	// Wait for termination of the task runners
@@ -485,12 +488,14 @@ OUTER:
 	r.logger.Printf("[DEBUG] client: terminating runner for alloc '%s'", r.alloc.ID)
 }
 
-// checkResources monitors and enforces alloc resource usage
-func (r *AllocRunner) checkResources() (bool, string) {
-	if r.ctx.AllocDir.Size > r.Alloc().Resources.DiskInBytes() {
-		return true, structs.TaskDiskExceeded
+// checkResources monitors and enforces alloc resource usage. It returns an
+// appropriate task event describing why the allocation had to be killed.
+func (r *AllocRunner) checkResources() (*structs.TaskEvent, string) {
+	if r.ctx.AllocDir.GetSize() > r.Alloc().Resources.DiskInBytes() {
+		return structs.NewTaskEvent(structs.TaskDiskExceeded),
+			fmt.Sprintf("shared allocation directory exceeded the allowed disk space.")
 	}
-	return false, ""
+	return nil, ""
 }
 
 // handleDestroy blocks till the AllocRunner should be destroyed and does the

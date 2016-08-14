@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/nomad/client/testutil"
 	"github.com/hashicorp/nomad/nomad/structs"
@@ -221,4 +222,34 @@ func TestAllocDir_MountSharedAlloc(t *testing.T) {
 			t.Fatalf("Incorrect data read from task dir: want %v; got %v", exp, act)
 		}
 	}
+}
+
+func TestAllocDir_MonitorDiskSpace(t *testing.T) {
+	tmp, err := ioutil.TempDir("", "AllocDir")
+	if err != nil {
+		t.Fatalf("Couldn't create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmp)
+
+	d := NewAllocDir(tmp, structs.DefaultResources().DiskMB)
+	defer d.Destroy()
+	tasks := []*structs.Task{t1, t2}
+	if err := d.Build(tasks); err != nil {
+		t.Fatalf("Build(%v) failed: %v", tasks, err)
+	}
+
+	d.MaxCheckDiskInterval = 1 * time.Second
+	d.MinCheckDiskInterval = 5 * time.Second
+	d.CheckDiskMaxEnforcePeriod = 5 * time.Second
+
+	data := []byte{'f', 'o', 'o'}
+	file := "bar"
+	path := filepath.Join(d.SharedDir, file)
+	if err := ioutil.WriteFile(path, data, 0777); err != nil {
+		t.Fatalf("Couldn't write file to shared directory: %v", err)
+	}
+
+	go d.StartDiskWatcher()
+
+	d.StopDiskWatcher()
 }
