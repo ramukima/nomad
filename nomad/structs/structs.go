@@ -2202,6 +2202,16 @@ type TaskEvent struct {
 
 	// Validation fields
 	ValidationError string // Validation error
+
+	// The maximum allowed task disk size.
+	DiskLimit int64
+
+	// The recorded task disk size.
+	DiskSize int64
+
+	// Name of the sibling task that caused termination of the task that
+	// the TaskEvent refers to.
+	FailedSibling string
 }
 
 func (te *TaskEvent) GoString() string {
@@ -2281,6 +2291,21 @@ func (e *TaskEvent) SetValidationError(err error) *TaskEvent {
 
 func (e *TaskEvent) SetKillTimeout(timeout time.Duration) *TaskEvent {
 	e.KillTimeout = timeout
+	return e
+}
+
+func (e *TaskEvent) SetDiskLimit(limit int64) *TaskEvent {
+	e.DiskLimit = limit
+	return e
+}
+
+func (e *TaskEvent) SetDiskSize(size int64) *TaskEvent {
+	e.DiskSize = size
+	return e
+}
+
+func (e *TaskEvent) SetFailedSibling(sibling string) *TaskEvent {
+	e.FailedSibling = sibling
 	return e
 }
 

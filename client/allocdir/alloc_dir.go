@@ -63,7 +63,7 @@ type AllocDir struct {
 	TaskDirs map[string]string
 
 	// Size is the total consumed disk size of the shared directory in bytes
-	Size     int64
+	size     int64
 	sizeLock sync.RWMutex
 
 	// The minimum frequency to use for disk monitoring.
@@ -457,15 +457,15 @@ func (d *AllocDir) GetSize() int64 {
 	d.sizeLock.Lock()
 	defer d.sizeLock.Unlock()
 
-	return d.Size
+	return d.size
 }
 
-// SetSize sets the size of the shared allocation directory.
-func (d *AllocDir) SetSize(size int64) {
+// setSize sets the size of the shared allocation directory.
+func (d *AllocDir) setSize(size int64) {
 	d.sizeLock.Lock()
 	defer d.sizeLock.Unlock()
 
-	d.Size = size
+	d.size = size
 }
 
 // StartDiskWatcher periodically checks the disk space consumed by the shared
@@ -488,7 +488,7 @@ func (d *AllocDir) StartDiskWatcher() {
 				log.Printf("[WARN] client: failed to sync disk usage: %v", err)
 			}
 			// Calculate the disk ratio.
-			diskRatio := float64(d.Size) / float64(d.maxSize*structs.BytesInMegabyte)
+			diskRatio := float64(d.size) / float64(d.maxSize*structs.BytesInMegabyte)
 
 			// Exponentially decrease the interval when the disk ratio increases.
 			nextInterval := time.Duration(int64(1.0/(0.1*math.Pow(diskRatio, 2))+5)) * time.Second
@@ -527,6 +527,6 @@ func (d *AllocDir) syncDiskUsage() error {
 			return nil
 		})
 	// Store the disk consumption
-	d.SetSize(size)
+	d.setSize(size)
 	return err
 }

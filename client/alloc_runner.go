@@ -58,8 +58,7 @@ type AllocRunner struct {
 	restored   map[string]struct{}
 	taskLock   sync.RWMutex
 
-	taskStatusLock    sync.RWMutex
-	taskDestroyReason string
+	taskStatusLock sync.RWMutex
 
 	updateCh chan *structs.Allocation
 
@@ -83,18 +82,17 @@ type allocRunnerState struct {
 func NewAllocRunner(logger *log.Logger, config *config.Config, updater AllocStateUpdater,
 	alloc *structs.Allocation) *AllocRunner {
 	ar := &AllocRunner{
-		config:            config,
-		updater:           updater,
-		logger:            logger,
-		alloc:             alloc,
-		dirtyCh:           make(chan struct{}, 1),
-		tasks:             make(map[string]*TaskRunner),
-		taskStates:        copyTaskStates(alloc.TaskStates),
-		taskDestroyReason: structs.TaskKilled,
-		restored:          make(map[string]struct{}),
-		updateCh:          make(chan *structs.Allocation, 64),
-		destroyCh:         make(chan struct{}),
-		waitCh:            make(chan struct{}),
+		config:     config,
+		updater:    updater,
+		logger:     logger,
+		alloc:      alloc,
+		dirtyCh:    make(chan struct{}, 1),
+		tasks:      make(map[string]*TaskRunner),
+		taskStates: copyTaskStates(alloc.TaskStates),
+		restored:   make(map[string]struct{}),
+		updateCh:   make(chan *structs.Allocation, 64),
+		destroyCh:  make(chan struct{}),
+		waitCh:     make(chan struct{}),
 	}
 	return ar
 }
@@ -340,7 +338,7 @@ func (r *AllocRunner) setTaskState(taskName, state string, event *structs.TaskEv
 		for task, tr := range r.tasks {
 			if task != taskName {
 				destroyingTasks = append(destroyingTasks, task)
-				tr.Destroy(structs.NewTaskEvent(structs.TaskSiblingFailed))
+				tr.Destroy(structs.NewTaskEvent(structs.TaskSiblingFailed).SetFailedSibling(taskName))
 			}
 		}
 		if len(destroyingTasks) > 0 {
@@ -493,9 +491,11 @@ OUTER:
 // checkResources monitors and enforces alloc resource usage. It returns an
 // appropriate task event describing why the allocation had to be killed.
 func (r *AllocRunner) checkResources() (*structs.TaskEvent, string) {
-	if r.ctx.AllocDir.GetSize() > r.Alloc().Resources.DiskInBytes() {
-		return structs.NewTaskEvent(structs.TaskDiskExceeded),
-			fmt.Sprintf("shared allocation directory exceeded the allowed disk space.")
+	diskSize := r.ctx.AllocDir.GetSize()
+	diskLimit := r.Alloc().Resources.DiskInBytes()
+	if diskSize > diskLimit {
+		return structs.NewTaskEvent(structs.TaskDiskExceeded).SetDiskLimit(diskLimit).SetDiskSize(diskSize),
+			"shared allocation directory exceeded the allowed disk space."
 	}
 	return nil, ""
 }

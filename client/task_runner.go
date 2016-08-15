@@ -402,7 +402,10 @@ func (r *TaskRunner) run() {
 				close(stopCollection)
 
 				// Store that the task has been destroyed and any associated error.
-				r.setState(structs.TaskStateDead, r.destroyEvent.SetKillError(err))
+				r.setState(structs.TaskStateDead, structs.NewTaskEvent(structs.TaskKilled).SetKillError(err))
+
+				// Store that task event that provides context on the task destroy.
+				r.setState(structs.TaskStateDead, r.destroyEvent)
 
 				r.runningLock.Lock()
 				r.running = false
