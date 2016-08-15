@@ -431,7 +431,7 @@ func (r *AllocRunner) Run() {
 	watchdog := time.NewTicker(watchdogInterval)
 	defer watchdog.Stop()
 
-	// taskDestroyEvent contains an event that caused termination of a task
+	// taskDestroyEvent contains an event that caused the destroyment of a task
 	// in the allocation.
 	var taskDestroyEvent *structs.TaskEvent
 
@@ -447,6 +447,7 @@ OUTER:
 
 			// Check if we're in a terminal status
 			if update.TerminalStatus() {
+				taskDestroyEvent = structs.NewTaskEvent(structs.TaskTerminated)
 				break OUTER
 			}
 
@@ -462,6 +463,7 @@ OUTER:
 				break OUTER
 			}
 		case <-r.destroyCh:
+			taskDestroyEvent = structs.NewTaskEvent(structs.TaskKilled)
 			break OUTER
 		}
 	}

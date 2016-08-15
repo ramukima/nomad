@@ -617,7 +617,8 @@ func (r *TaskRunner) Update(update *structs.Allocation) {
 	}
 }
 
-// Destroy is used to indicate that the task context should be destroyed
+// Destroy is used to indicate that the task context should be destroyed. The
+// event parameter provides a context for the destroy.
 func (r *TaskRunner) Destroy(event *structs.TaskEvent) {
 	r.destroyLock.Lock()
 	defer r.destroyLock.Unlock()
