@@ -238,9 +238,9 @@ func NewClient(cfg *config.Config, consulSyncer *consul.Syncer, logger *log.Logg
 	// populated by periodically polling Consul, if available.
 	go c.rpcProxy.Run()
 
-	// Start renewing Vault tokens
-	go c.vaultClient.Run()
-	c.vaultClient.Stop()
+	// Start renewing Vault data
+	go c.vaultClient.Start()
+	//c.vaultClient.Stop()
 
 	return c, nil
 }
@@ -1232,10 +1232,12 @@ func (c *Client) setupVaultClient() error {
 		return fmt.Errorf("periodic_token not set")
 	}
 
-	c.vaultClient = &vaultclient.DefaultVaultClient{
-		PeriodicToken: c.config.VaultConfig.PeriodicToken,
-		ShutdownCh:    make(chan bool),
+	var err error
+	c.vaultClient, err = vaultclient.NewVaultClient(c.config.VaultConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create vault client: %v", err)
 	}
+
 	return nil
 }
 
