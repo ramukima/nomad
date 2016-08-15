@@ -2,7 +2,6 @@ package vaultclient
 
 import (
 	"container/heap"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -27,20 +26,23 @@ type VaultClient interface {
 
 type vaultClient struct {
 	running        bool
-	periodicToken  string
+	token          string
+	taskTokenTTL   string
 	vaultAPIClient *vaultapi.Client
+	updateCh       chan struct{}
 	stopCh         chan struct{}
 	heap           *vaultClientHeap
 	lock           sync.RWMutex
+	logger         *log.Logger
 }
 
-type vaultClientRenewalData struct {
+type vaultClientRenewalRequest struct {
 	errCh chan error
 	id    string
 }
 
 type vaultClientHeapEntry struct {
-	data  *vaultClientRenewalData
+	data  *vaultClientRenewalRequest
 	next  time.Time
 	index int
 }
@@ -67,7 +69,7 @@ func (h *vaultClientHeap) Peek() *vaultClientHeapEntry {
 	return h.heap[0]
 }
 
-func (h *vaultClientHeap) Push(vData *vaultClientRenewalData, next time.Time) error {
+func (h *vaultClientHeap) Push(vData *vaultClientRenewalRequest, next time.Time) error {
 	if _, ok := h.heapMap[vData.id]; ok {
 		return fmt.Errorf("entry %v already exists", vData.id)
 	}
@@ -81,7 +83,7 @@ func (h *vaultClientHeap) Push(vData *vaultClientRenewalData, next time.Time) er
 	return nil
 }
 
-func (h *vaultClientHeap) Update(vData *vaultClientRenewalData, next time.Time) error {
+func (h *vaultClientHeap) Update(vData *vaultClientRenewalRequest, next time.Time) error {
 	if entry, ok := h.heapMap[vData.id]; ok {
 		entry.data = vData
 		entry.next = next
@@ -94,18 +96,23 @@ func (h *vaultClientHeap) Update(vData *vaultClientRenewalData, next time.Time) 
 
 type vaultDataHeapImp []*vaultClientHeapEntry
 
-func NewVaultClient(vaultConfig *config.VaultConfig) (*vaultClient, error) {
+func NewVaultClient(vaultConfig *config.VaultConfig, logger *log.Logger) (*vaultClient, error) {
 	if vaultConfig == nil {
 		return nil, fmt.Errorf("nil, vaultConfig")
 	}
-	if vaultConfig.PeriodicToken == "" {
+	if vaultConfig.Token == "" {
 		return nil, fmt.Errorf("periodic_token not set")
 	}
 
+	log.Printf("vaultConfig.TaskTokenTTL: %s\n", vaultConfig.TaskTokenTTL)
+
 	return &vaultClient{
-		periodicToken: vaultConfig.PeriodicToken,
-		stopCh:        make(chan struct{}),
-		heap:          NewVaultDataHeap(),
+		token:        vaultConfig.Token,
+		taskTokenTTL: vaultConfig.TaskTokenTTL,
+		stopCh:       make(chan struct{}),
+		updateCh:     make(chan struct{}, 1),
+		heap:         NewVaultDataHeap(),
+		logger:       logger,
 	}, nil
 }
 
@@ -117,43 +124,34 @@ func NewVaultDataHeap() *vaultClientHeap {
 }
 
 func (c *vaultClient) Start() {
-	log.Printf("vaultclient: Started========================***=================================")
+	c.logger.Printf("[INFO] vaultClient started")
 	c.lock.Lock()
 	c.running = true
 	c.lock.Unlock()
-
-	// TODO: Test code begins
-	derivedWrappedToken, err := c.DeriveToken()
-	if err != nil {
-		log.Printf("vaultclient: failed to derive a vault token: %v", err)
-	}
-	c.RenewToken(derivedWrappedToken)
-	// TODO: Test code ends
-
 	go c.run()
 }
 
 func (c *vaultClient) run() {
 	var renewalCh <-chan time.Time
 	for {
-		renewalData, renewalTime := c.nextRenewal()
+		renewalReq, renewalTime := c.nextRenewal()
 		if renewalTime.IsZero() {
 			renewalCh = nil
 		} else {
 			renewalDuration := renewalTime.Sub(time.Now())
 			renewalCh = time.After(renewalDuration)
+			c.logger.Printf("[INFO] setting renewal to %s\n", renewalDuration)
 		}
 
 		select {
 		case <-renewalCh:
-			log.Printf("renewal time for data: %#v\n", renewalData)
-			next := time.Now().Add(5 * time.Second)
-			if err := c.heap.Update(renewalData, next); err != nil {
-				log.Printf("vaultclient: error while resetting renewal time: %v\n", err)
-				renewalData.errCh <- fmt.Errorf("failed to update heap entry: %v", err)
+			if err := c.renew(renewalReq); err != nil {
+				renewalReq.errCh <- err
 			}
+		case <-c.updateCh:
+			continue
 		case <-c.stopCh:
-			log.Printf("vaultclient: Stopped=======================***==================================")
+			c.logger.Printf("[INFO] vaultClient stopped")
 			return
 		}
 	}
@@ -165,10 +163,9 @@ func (c *vaultClient) Stop() {
 
 func (c *vaultClient) DeriveToken() (string, error) {
 	tcr := &vaultapi.TokenCreateRequest{
-		ID:          "vault-token-123",
 		Policies:    []string{"foo", "bar"},
 		TTL:         "10s",
-		DisplayName: "derived-token",
+		DisplayName: "derived-for-task",
 		Renewable:   new(bool),
 	}
 	*tcr.Renewable = true
@@ -213,85 +210,75 @@ func (c *vaultClient) GetConsulACL() (string, error) {
 }
 
 func (c *vaultClient) RenewToken(token string) <-chan error {
-	errCh := make(chan error)
+	renewalReq := &vaultClientRenewalRequest{
+		errCh: make(chan error),
+		id:    token,
+	}
+
+	if err := c.renew(renewalReq); err != nil {
+		renewalReq.errCh <- err
+	}
+
+	// Signal an update.
+	if c.running {
+		select {
+		case c.updateCh <- struct{}{}:
+		default:
+		}
+	}
+
+	return renewalReq.errCh
+}
+
+func (c *vaultClient) renew(req *vaultClientRenewalRequest) error {
+	c.logger.Printf("[INFO] renew called for id: %s", req.id)
+	if req == nil {
+		return fmt.Errorf("nil renewal request")
+	}
+	if req.id == "" {
+		return fmt.Errorf("missing id in renewal request")
+	}
+
 	client, err := c.getVaultAPIClient()
 	if err != nil {
-		errCh <- fmt.Errorf("failed to create vault API client: %v", err)
-		return errCh
+		return fmt.Errorf("failed to create vault API client: %v", err)
 	}
 
-	lookupResp, err := client.Auth().Token().Lookup(token)
+	increment, err := vaultduration.ParseDurationSecond(c.taskTokenTTL)
 	if err != nil {
-		errCh <- fmt.Errorf("failed to lookup the vault token: %v", err)
-		return errCh
+		return fmt.Errorf("failed to parse task_token_ttl:%v", err)
 	}
-	if lookupResp == nil || lookupResp.Data == nil {
-		errCh <- fmt.Errorf("failed to lookup the vault token: %v", err)
-		return errCh
-	}
+	// Convert increment to seconds
+	increment /= time.Second
 
-	creationTTL := lookupResp.Data["creation_ttl"].(json.Number)
-	increment, err := creationTTL.Int64()
+	renewResp, err := client.Auth().Token().Renew(req.id, int(increment))
 	if err != nil {
-		errCh <- fmt.Errorf("failed to fetch increment: %v", err)
-		return errCh
-	}
-
-	renewResp, err := client.Auth().Token().Renew(token, int(increment))
-	if err != nil {
-		errCh <- fmt.Errorf("failed to renew the vault token: %v", err)
-		return errCh
+		return fmt.Errorf("failed to renew the vault token: %v", err)
 	}
 	if renewResp == nil || renewResp.Auth == nil {
-		errCh <- fmt.Errorf("failed to renew the vault token")
-		return errCh
+		return fmt.Errorf("failed to renew the vault token")
 	}
 
 	leaseDuration, err := vaultduration.ParseDurationSecond(strconv.Itoa(renewResp.Auth.LeaseDuration))
 	if err != nil {
-		errCh <- fmt.Errorf("failed to parse the leaseduration:%v", err)
-		return errCh
+		return fmt.Errorf("failed to parse the leaseduration:%v", err)
 	}
-
-	// Add or update the token in the heap
-	// Check if the token is already present in the heap
-	renewalData := &vaultClientRenewalData{
-		errCh: errCh,
-		id:    token,
-	}
-
-	log.Printf("vaultclient: RenewToken(): leaseDuration: %s\n", leaseDuration)
 
 	next := time.Now().Add(leaseDuration / 2)
-	if c.heap.IsTracked(token) {
-		if err := c.heap.Update(renewalData, next); err != nil {
-			errCh <- fmt.Errorf("failed to update heap entry. err: %v", err)
-			return errCh
+	if c.heap.IsTracked(req.id) {
+		if err := c.heap.Update(req, next); err != nil {
+			return fmt.Errorf("failed to update heap entry. err: %v", err)
 		}
 	} else {
-		if err := c.heap.Push(renewalData, next); err != nil {
-			errCh <- fmt.Errorf("failed to push an entry to heap.  err: %v", err)
-			return errCh
+		if err := c.heap.Push(req, next); err != nil {
+			return fmt.Errorf("failed to push an entry to heap.  err: %v", err)
 		}
 	}
 
-	// TODO: Test code begins
-	renewalData2 := &vaultClientRenewalData{
-		errCh: make(chan error),
-		id:    token + "4",
-	}
-	if err := c.heap.Push(renewalData2, next.Add(10*time.Second)); err != nil {
-		log.Printf("failed to push renewalData: err: %v.  vaultTokenData %#v\n", err, renewalData)
-	}
-	// TODO: Test code ends
-
-	log.Printf("vaultclient: heap len: %d", c.heap.Length())
-	log.Printf("vaultclient: heap peek: %#v", c.heap.Peek())
-
-	return errCh
+	return nil
 }
 
-func (c *vaultClient) nextRenewal() (*vaultClientRenewalData, time.Time) {
+func (c *vaultClient) nextRenewal() (*vaultClientRenewalRequest, time.Time) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	if c.heap.Length() == 0 {
@@ -323,7 +310,7 @@ func (c *vaultClient) getVaultAPIClient() (*vaultapi.Client, error) {
 		}
 
 		// Set the authentication required
-		client.SetToken(c.periodicToken)
+		client.SetToken(c.token)
 		c.vaultAPIClient = client
 	}
 

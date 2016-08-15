@@ -18,17 +18,27 @@ IMPROVEMENTS:
   * cli: status commands support JSON output and go template formating [GH-1503]
   * cli: Validate and plan command supports reading from stdin [GH-1460,
     GH-1458]
+  * cli: `nomad node-status` shows volume name for non-physical volumes instead
+    of showing 0B used [GH-1538]
   * client: Add killing event to task state [GH-1457]
   * client: Fingerprint network speed on Windows [GH-1443]
+  * discovery: Support for initial check status [GH-1562]
   * driver/docker: Allow working directory to be configured [GH-1513]
+  * driver/docker: Remove docker volumes when removing container [GH-1519]
+  * driver/docker: Set windows containers network mode to nat by default
+    [GH-1521]
+  * driver/exec: Allow chroot environment to be configurable [GH-1518]
   * telemetry: Circonus integration for telemetry metrics [GH-1459]
   * telemetry: Allow operators to opt-in for publishing metrics [GH-1501]
 
 BUG FIXES:
+  * agent: Reload agent configuration on SIGHUP [GH-1566]
   * core: Sanitize empty slices/maps in jobs to avoid incorrect create/destroy
     updates [GH-1434]
   * core: Fix race in which a Node registers and doesn't receive system jobs
     [GH-1456]
+  * core: Fix issue in which Nodes with large amount of reserved ports would
+    casue dynamic port allocations to fail [GH-1526]
   * core: Fix a condition in which old batch allocations could get updated even
     after terminal. In a rare case this could cause a server panic [GH-1471]
   * core: Do not update the Job attached to Allocations that have been marked
@@ -43,6 +53,8 @@ BUG FIXES:
   * driver/docker: Default network type is "nat" on Windows [GH-1521]
   * driver/docker: Cleanup created volume when destroying container [GH-1519]
   * driver/rkt: Validate the command and trust_prefix configs [GH-1493]
+  * plan: Plan on system jobs discounts nodes that do not meet required
+    constraints [GH-1568]
 
 ## 0.4.0
 

@@ -324,6 +324,7 @@ func parseClient(result **ClientConfig, list *ast.ObjectList) error {
 		"node_class",
 		"options",
 		"meta",
+		"chroot_env",
 		"network_interface",
 		"network_speed",
 		"max_kill_timeout",
@@ -343,6 +344,7 @@ func parseClient(result **ClientConfig, list *ast.ObjectList) error {
 
 	delete(m, "options")
 	delete(m, "meta")
+	delete(m, "chroot_env")
 	delete(m, "reserved")
 	delete(m, "stats")
 
@@ -374,6 +376,20 @@ func parseClient(result **ClientConfig, list *ast.ObjectList) error {
 				return err
 			}
 			if err := mapstructure.WeakDecode(m, &config.Meta); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Parse out chroot_env fields. These are in HCL as a list so we need to
+	// iterate over them and merge them.
+	if chrootEnvO := listVal.Filter("chroot_env"); len(chrootEnvO.Items) > 0 {
+		for _, o := range chrootEnvO.Elem().Items {
+			var m map[string]interface{}
+			if err := hcl.DecodeObject(&m, o.Val); err != nil {
+				return err
+			}
+			if err := mapstructure.WeakDecode(m, &config.ChrootEnv); err != nil {
 				return err
 			}
 		}
@@ -639,16 +655,15 @@ func parseVaultConfig(result **config.VaultConfig, list *ast.ObjectList) error {
 	valid := []string{
 		"address",
 		"allow_unauthenticated",
-		"child_token_ttl",
 		"enabled",
-		"periodic_token",
+		"task_token_ttl",
 		"tls_ca_file",
 		"tls_ca_path",
 		"tls_cert_file",
 		"tls_key_file",
 		"tls_server_name",
 		"tls_skip_verify",
-		"token_role_name",
+		"token",
 	}
 
 	if err := checkHCLKeys(listVal, valid); err != nil {

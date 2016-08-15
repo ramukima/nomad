@@ -184,15 +184,19 @@ func (s *SystemScheduler) computeJobAllocs() error {
 			s.eval.JobID, err)
 	}
 
-	// Filter out the allocations in a terminal state
-	allocs = structs.FilterTerminalAllocs(allocs)
-
 	// Determine the tainted nodes containing job allocs
 	tainted, err := taintedNodes(s.state, allocs)
 	if err != nil {
 		return fmt.Errorf("failed to get tainted nodes for job '%s': %v",
 			s.eval.JobID, err)
 	}
+
+	// Update the allocations which are in pending/running state on tainted
+	// nodes to lost
+	updateNonTerminalAllocsToLost(s.plan, tainted, allocs)
+
+	// Filter out the allocations in a terminal state
+	allocs = structs.FilterTerminalAllocs(allocs)
 
 	// Diff the required and existing allocations
 	diff := diffSystemAllocs(s.job, s.nodes, tainted, allocs)
@@ -255,6 +259,10 @@ func (s *SystemScheduler) computePlacements(place []allocTuple) error {
 	}
 
 	nodes := make([]*structs.Node, 1)
+
+	// nodesFiltered holds the number of nodes filtered by the stack due to
+	// constrain mismatches while we are trying to place allocations on node
+	var nodesFiltered int
 	for _, missing := range place {
 		node, ok := nodeByID[missing.Alloc.NodeID]
 		if !ok {
@@ -269,6 +277,24 @@ func (s *SystemScheduler) computePlacements(place []allocTuple) error {
 		option, _ := s.stack.Select(missing.TaskGroup)
 
 		if option == nil {
+			// If nodes were filtered because of constain mismatches and we
+			// couldn't create an allocation then decrementing queued for that
+			// task group
+			if s.ctx.metrics.NodesFiltered > nodesFiltered {
+				s.queuedAllocs[missing.TaskGroup.Name] -= 1
+
+				// If we are annotating the plan, then decrement the desired
+				// placements based on whether the node meets the constraints
+				if s.eval.AnnotatePlan && s.plan.Annotations != nil &&
+					s.plan.Annotations.DesiredTGUpdates != nil {
+					desired := s.plan.Annotations.DesiredTGUpdates[missing.TaskGroup.Name]
+					desired.Place -= 1
+				}
+			}
+
+			// Record the current number of nodes filtered in this iteration
+			nodesFiltered = s.ctx.metrics.NodesFiltered
+
 			// Check if this task group has already failed
 			if metric, ok := s.failedTGAllocs[missing.TaskGroup.Name]; ok {
 				metric.CoalescedFailures += 1

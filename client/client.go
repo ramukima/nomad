@@ -240,7 +240,16 @@ func NewClient(cfg *config.Config, consulSyncer *consul.Syncer, logger *log.Logg
 
 	// Start renewing Vault data
 	go c.vaultClient.Start()
-	//c.vaultClient.Stop()
+
+	// TODO: Test code begins
+	for i := 0; i < 2; i++ {
+		derivedWrappedToken, err := c.vaultClient.DeriveToken()
+		if err != nil {
+			log.Printf("vaultclient: failed to derive a vault token: %v", err)
+		}
+		c.vaultClient.RenewToken(derivedWrappedToken)
+	}
+	// TODO: Test code ends
 
 	return c, nil
 }
@@ -355,8 +364,7 @@ func (c *Client) RPC(method string, args interface{}, reply interface{}) error {
 	// Make the RPC request
 	if err := c.connPool.RPC(c.Region(), server.Addr, c.RPCMajorVersion(), method, args, reply); err != nil {
 		c.rpcProxy.NotifyFailedServer(server)
-		c.logger.Printf("[ERR] client: RPC failed to server %s: %v", server.Addr, err)
-		return err
+		return fmt.Errorf("RPC failed to server %s: %v", server.Addr, err)
 	}
 	return nil
 }
@@ -845,10 +853,9 @@ func (c *Client) registerNode() error {
 		WriteRequest: structs.WriteRequest{Region: c.Region()},
 	}
 	var resp structs.NodeUpdateResponse
-	err := c.RPC("Node.Register", &req, &resp)
-	if err != nil {
+	if err := c.RPC("Node.Register", &req, &resp); err != nil {
 		if time.Since(c.start) > registerErrGrace {
-			c.logger.Printf("[ERR] client: failed to register node: %v", err)
+			return fmt.Errorf("failed to register node: %v", err)
 		}
 		return err
 	}
@@ -879,10 +886,8 @@ func (c *Client) updateNodeStatus() error {
 		WriteRequest: structs.WriteRequest{Region: c.Region()},
 	}
 	var resp structs.NodeUpdateResponse
-	err := c.RPC("Node.UpdateStatus", &req, &resp)
-	if err != nil {
-		c.logger.Printf("[ERR] client: failed to update status: %v", err)
-		return err
+	if err := c.RPC("Node.UpdateStatus", &req, &resp); err != nil {
+		return fmt.Errorf("failed to update status: %v", err)
 	}
 	if len(resp.EvalIDs) != 0 {
 		c.logger.Printf("[DEBUG] client: %d evaluations triggered by node update", len(resp.EvalIDs))
@@ -1228,12 +1233,12 @@ func (c *Client) setupVaultClient() error {
 	if c.config.VaultConfig == nil {
 		return fmt.Errorf("nil vaultConfig")
 	}
-	if c.config.VaultConfig.PeriodicToken == "" {
+	if c.config.VaultConfig.Token == "" {
 		return fmt.Errorf("periodic_token not set")
 	}
 
 	var err error
-	c.vaultClient, err = vaultclient.NewVaultClient(c.config.VaultConfig)
+	c.vaultClient, err = vaultclient.NewVaultClient(c.config.VaultConfig, c.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create vault client: %v", err)
 	}
